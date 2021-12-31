@@ -222,6 +222,59 @@ func Test_NormalJob5(t *testing.T) {
 	fmt.Printf("\nTest Finished.")
 }
 
+func Test_NormalJob6(t *testing.T) {
+	wg := sync.WaitGroup{}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	fmt.Printf("\nTest Started.")
+
+	executor := jobExecutor.NewJobExecutor("NormalJob6", 10)
+	executor.Debug = true
+	wg.Add(1)
+	go executor.Run(ctx, &wg)
+	runtime.Gosched()
+
+	deadline := time.Duration(2) * time.Second //2 second cancel deadling
+	startAt := time.Now().Add(time.Duration(5) * time.Minute)
+	job1 := TestJob{name: "NormalJob6-1", jobType: jobExecutor.QueueJob, when: startAt, maxduration: &deadline,
+		durSleep: -1 * time.Second} //sleep dur 2 - 1 = 2 sec
+	executor.AddJob(ctx, &job1)
+
+	deadline = time.Duration(5) * time.Second //5 second cancel deadling
+	job2 := TestJob{name: "NormalJob6-2", jobType: jobExecutor.QueueJob, when: time.Now(), maxduration: &deadline,
+		durSleep: -500 * time.Millisecond} //sleep dur 5 - 0.5 = 4.5 sec
+	executor.AddJob(ctx, &job2)
+
+	time.Sleep(1 * time.Second) //checking after 1 sec
+
+	val := executor.ExecutingQueueLen()
+	if val != 2 {
+		t.Errorf("\nExpected 2 jobs to be executing (%v)", val)
+	}
+	val = executor.WaitingQueueLen()
+	if val != 0 {
+		t.Errorf("\nExpected 0 jobs to be waiting (%v)", val)
+	}
+	time.Sleep(1 * time.Second) //checking after 1 sec
+
+	if !job1.execTime.IsZero() {
+		t.Errorf("\nExpected job to NOT be started")
+	}
+	if !job1.cancelled.IsZero() {
+		t.Errorf("\nExpected job to NOT be cancelled")
+	}
+	if !job1.exitTime.IsZero() {
+		t.Errorf("\nExpected job to NOT  be exited")
+	}
+
+	if job2.execTime.IsZero() {
+		t.Errorf("\nExpected job to be started")
+	}
+	cancel()
+	wg.Wait()
+	fmt.Printf("\nTest Finished.")
+}
+
 func Test_OverriderJob1(t *testing.T) {
 	wg := sync.WaitGroup{}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -283,6 +336,58 @@ func Test_OverriderJob2(t *testing.T) {
 	job2 := TestJob{name: "OverrideJob2", jobType: jobExecutor.CancelAndQueueJob, when: time.Now(), maxduration: &deadline,
 		durSleep: -1 * time.Second} //sleep dur 2 - 1 = 1 sec
 	executor.AddJob(ctx, &job2)
+
+	time.Sleep(2 * time.Second) //checking after 2 sec
+
+	if job1.execTime.IsZero() {
+		t.Errorf("\nExpected job to be started")
+	}
+	if job1.cancelled.IsZero() {
+		t.Errorf("\nExpected job to be cancelled")
+	}
+	if !job1.exitTime.IsZero() {
+		t.Errorf("\nExpected job to be exited")
+	}
+	cancel()
+	wg.Wait()
+	fmt.Printf("\nTest Finished.")
+}
+
+func Test_OverriderJob3(t *testing.T) {
+	wg := sync.WaitGroup{}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	fmt.Printf("\nTest Started.")
+
+	executor := jobExecutor.NewJobExecutor("OverrideJob3", 10)
+	executor.Debug = true
+	wg.Add(1)
+	go executor.Run(ctx, &wg)
+	runtime.Gosched()
+
+	deadline := time.Duration(2) * time.Second //2 second cancel deadling
+
+	job1 := TestJob{name: "NormalJob2", jobType: jobExecutor.QueueJob, when: time.Now(), maxduration: nil,
+		durSleep: 5 * time.Second} //sleep dur 5 sec
+	executor.AddJob(ctx, &job1)
+
+	job1 = TestJob{name: "NormalJob3", jobType: jobExecutor.QueueJob, when: time.Now(), maxduration: nil,
+		durSleep: 2 * time.Second} //sleep dur 5 sec
+	executor.AddJob(ctx, &job1)
+
+	time.Sleep(1 * time.Second)
+
+	job2 := TestJob{name: "OverrideJob3", jobType: jobExecutor.CancelAndQueueJob, when: time.Now(), maxduration: &deadline,
+		durSleep: -1 * time.Second} //sleep dur 2 - 1 = 1 sec
+	executor.AddJob(ctx, &job2)
+
+	job3 := TestJob{name: "OverrideJob4", jobType: jobExecutor.CancelAndQueueJob, when: time.Now(), maxduration: &deadline,
+		durSleep: -1 * time.Second} //sleep dur 2 - 1 = 1 sec
+	executor.AddJob(ctx, &job3)
+
+	job3 = TestJob{name: "OverrideJob5", jobType: jobExecutor.CancelAndQueueJob, when: time.Now(), maxduration: &deadline,
+		durSleep: -1 * time.Second} //sleep dur 2 - 1 = 1 sec
+	executor.AddJob(ctx, &job3)
 
 	time.Sleep(2 * time.Second) //checking after 2 sec
 

@@ -65,6 +65,8 @@ func (s *JobExecutor) getLastOverrideJob(ctx context.Context) Job {
 Loop:
 	for {
 		select {
+		case <-ctx.Done():
+			break Loop
 		case j := <-s.overrideChannel:
 			if lastJob != nil {
 				if s.Debug {
@@ -79,10 +81,12 @@ Loop:
 	return lastJob
 }
 
-func (s JobExecutor) ignoreJobsTillOverrideJob(ctx context.Context, override Job) {
+func (s *JobExecutor) ignoreJobsTillOverrideJob(ctx context.Context, override Job) {
 Loop:
 	for {
 		select {
+		case <-ctx.Done():
+			break Loop
 		case j := <-s.channel:
 			if j == override {
 				break Loop
@@ -91,13 +95,12 @@ Loop:
 					fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor rejecting on override %v.", time.Now().UTC(), s.name, j.Name())
 				}
 			}
-		default:
-			break Loop
+			//No default: must dequeue the job from normal queue too
 		}
 	}
 }
 
-func (s JobExecutor) executeJob(ctx context.Context, j Job, jobId int64, jobFinished chan<- int64, childWg *sync.WaitGroup) {
+func (s *JobExecutor) executeJob(ctx context.Context, j Job, jobId int64, jobFinished chan<- int64, childWg *sync.WaitGroup) {
 	defer func() {
 		if childWg != nil {
 			childWg.Done()
@@ -133,8 +136,21 @@ func (s JobExecutor) executeJob(ctx context.Context, j Job, jobId int64, jobFini
 	}
 }
 
+func (s *JobExecutor) cancelJobs(ctx context.Context, jobName string) {
+	if s.cancelFuncs == nil {
+		return
+	}
+	for k, cf := range *s.cancelFuncs {
+		if s.Debug {
+			fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor to %v, cancelling %v", time.Now().UTC(), s.name, jobName, k)
+		}
+		cf()
+		delete(*s.cancelFuncs, k)
+	}
+}
+
 //Run - Deamon that dequeues the jobs and executes them
-func (s JobExecutor) Run(ctx context.Context, wg *sync.WaitGroup) {
+func (s *JobExecutor) Run(ctx context.Context, wg *sync.WaitGroup) {
 	//No MUTEX gaurd etc done... as expect disipline to invoke only once
 	//This check is just for accidental second Run
 	if s.cancelFuncs != nil {
@@ -171,6 +187,11 @@ func (s JobExecutor) Run(ctx context.Context, wg *sync.WaitGroup) {
 
 	var childWg sync.WaitGroup //WaitGroup for synching the child Job
 	defer childWg.Wait()       //Wait for all children to complete
+	defer func() {
+		if ctx.Err() == nil {
+			s.cancelJobs(ctx, "ExitRun") //cancel all executing jobs
+		}
+	}()
 
 Loop:
 	for {
@@ -179,6 +200,9 @@ Loop:
 				fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor job %v setting up to execute override.", time.Now().UTC(), s.name, overrideJob.Name())
 			}
 			s.ignoreJobsTillOverrideJob(ctx, overrideJob)
+			if ctx.Err() != nil {
+				break Loop
+			}
 			normalJob = overrideJob //set as next normalJob
 			overrideJob = nil
 		}
@@ -188,6 +212,9 @@ Loop:
 				fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor job %v setting up to execute normal.", time.Now().UTC(), s.name, normalJob.Name())
 			}
 			overrideJob = s.getLastOverrideJob(ctx)
+			if ctx.Err() != nil {
+				break Loop
+			}
 			if overrideJob != nil && overrideJob != normalJob {
 				fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor found another overriding job %v.", time.Now().UTC(), s.name, overrideJob.Name())
 				continue
@@ -232,13 +259,7 @@ Loop:
 				fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor picked new overrideJob : %v", time.Now().UTC(), s.name, overrideJob.Name())
 			}
 			//cancel all executing jobs
-			for k, cf := range cancelFuncs {
-				if s.Debug {
-					fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor to execute %v, cancelling %v", time.Now().UTC(), s.name, overrideJob.Name(), k)
-				}
-				cf()
-				delete(cancelFuncs, k)
-			}
+			s.cancelJobs(ctx, "execute "+overrideJob.Name())
 			if s.Debug {
 				fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor to execute %v, waiting for all cancelled jobs tp completed", time.Now().UTC(), s.name, overrideJob.Name())
 			}
