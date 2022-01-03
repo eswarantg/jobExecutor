@@ -154,7 +154,9 @@ func (s *JobExecutor) Run(ctx context.Context, wg *sync.WaitGroup) {
 	//No MUTEX gaurd etc done... as expect disipline to invoke only once
 	//This check is just for accidental second Run
 	if s.cancelFuncs != nil {
-		fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor Already running, Exiting.", time.Now().UTC(), s.name)
+		if s.Debug {
+			fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor Already running, Exiting.", time.Now().UTC(), s.name)
+		}
 		return
 	}
 	defer func() {
@@ -216,7 +218,9 @@ Loop:
 				break Loop
 			}
 			if overrideJob != nil && overrideJob != normalJob {
-				fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor found another overriding job %v.", time.Now().UTC(), s.name, overrideJob.Name())
+				if s.Debug {
+					fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor found another overriding job %v.", time.Now().UTC(), s.name, overrideJob.Name())
+				}
 				continue
 			}
 			var childCtx context.Context
