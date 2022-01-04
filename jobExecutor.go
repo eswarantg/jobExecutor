@@ -16,6 +16,7 @@ type JobExecutor struct {
 	cancelFuncs      *map[int64]context.CancelFunc //Cancel functions of the jobs running
 	Debug            bool                          //Debug - set to true will print additional logs on stdout
 	queingInProgress int64                         //queingInProgress - when queuing has to be done in both queues
+	minSleep         time.Duration                 //lowest resolution time below which sleep is ineffective
 }
 
 //NewJobExecutor - Create a new JobExecutor
@@ -26,7 +27,16 @@ func NewJobExecutor(name string, queueSize int) *JobExecutor {
 		overrideChannel:  make(chan Job, queueSize),
 		cancelFuncs:      nil,
 		queingInProgress: 0,
+		minSleep:         time.Duration(100) * time.Millisecond,
 	}
+}
+
+func (s *JobExecutor) GetMinSleep() time.Duration {
+	return s.minSleep
+}
+
+func (s *JobExecutor) SetMinSleep(d time.Duration) {
+	s.minSleep = d
 }
 
 //Current Queue of jobs waiting
@@ -112,9 +122,8 @@ func (s *JobExecutor) executeJob(ctx context.Context, j Job, jobId int64, jobFin
 			jobFinished <- jobId
 		}
 	}()
-	const minSleep time.Duration = time.Millisecond * time.Duration(100)
 	sleepDur := time.Until(j.When())
-	if sleepDur > minSleep {
+	if sleepDur > s.minSleep {
 		if s.Debug {
 			fmt.Fprintf(os.Stdout, "\n%v %v Job %v(%v) waiting %v.", time.Now().UTC(), s.name, j.Name(), jobId, sleepDur)
 		}
