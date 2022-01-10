@@ -133,15 +133,17 @@ func (s *JobExecutor) checkForNewOverride(ctx context.Context, overrideJob Job, 
 		}
 	} else {
 		if normalJob != nil {
-			panic("both cannot be NOT nil")
+			panic(fmt.Sprintf("both cannot be NOT nil %v,%v", overrideJob.Name(), normalJob.Name()))
 		}
 	}
 	ret := overrideJob //nil return if there is no override jobs
+Loop:
 	for len(s.overrideChannel) > 0 {
 		var j Job
 		var channelOpen bool
 		select {
 		case <-ctx.Done(): //ctx cancelled
+			break Loop
 		case j, channelOpen = <-s.overrideChannel: //override requested
 			if !channelOpen {
 				break
@@ -157,7 +159,7 @@ func (s *JobExecutor) checkForNewOverride(ctx context.Context, overrideJob Job, 
 				//}
 			}
 			if j != nil && ret != j {
-				if s.Debug {
+				if s.Debug && ret != nil {
 					fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor rejecting on override %v for %v.", time.Now().UTC(), s.name, ret.Name(), j.Name())
 				}
 				ret = j
@@ -169,19 +171,29 @@ func (s *JobExecutor) checkForNewOverride(ctx context.Context, overrideJob Job, 
 
 func (s *JobExecutor) clearPendingNormalJobs(ctx context.Context, overrideJob Job, normalJob Job) Job {
 	var channelOpen bool
+	var j Job
+Loop:
 	for len(s.channel) > 0 && overrideJob != nil && normalJob != overrideJob {
 		select {
 		case <-ctx.Done(): //ctx cancelled
-		case normalJob, channelOpen = <-s.channel: //override requested
+			break Loop
+		case j, channelOpen = <-s.channel: //override requested
 			if !channelOpen {
 				break
 			}
-			if normalJob != nil && overrideJob != normalJob {
-				if s.Debug {
+			if j == nil {
+				continue
+			}
+			if j != nil && overrideJob != j {
+				if s.Debug && normalJob != nil {
 					fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor rejecting on override %v for %v.", time.Now().UTC(), s.name, normalJob.Name(), overrideJob.Name())
 				}
+				normalJob = j
 			}
 		}
+	}
+	if normalJob == nil {
+		normalJob = overrideJob
 	}
 	return normalJob
 }
@@ -254,10 +266,13 @@ OuterLoop:
 		}
 		if overrideJob != nil {
 			normalJob = s.clearPendingNormalJobs(ctx, overrideJob, normalJob)
-			overrideJob = nil
-			if normalJob == nil {
-				panic("normal job cannot be nil")
+			if ctx.Err() != nil {
+				break
 			}
+			if normalJob == nil {
+				panic(fmt.Sprintf("normal job is nil, Override:%v", overrideJob.Name()))
+			}
+			overrideJob = nil
 		}
 		if normalJob != nil {
 			var childCtx context.Context
