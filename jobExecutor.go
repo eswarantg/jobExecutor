@@ -102,7 +102,7 @@ Loop:
 				break Loop
 			} else {
 				if s.Debug {
-					fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor rejecting on override %v.", time.Now().UTC(), s.name, j.Name())
+					fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor rejecting on override %v for %v.", time.Now().UTC(), s.name, j.Name(), override.Name())
 				}
 			}
 			//No default: must dequeue the job from normal queue too
@@ -145,7 +145,7 @@ func (s *JobExecutor) executeJob(ctx context.Context, j Job, jobId int64, jobFin
 	}
 }
 
-func (s *JobExecutor) cancelJobs(ctx context.Context, jobName string) {
+func (s *JobExecutor) cancelJobs(ctx context.Context, jobName string) (towait bool) {
 	if s.cancelFuncs == nil {
 		return
 	}
@@ -154,8 +154,10 @@ func (s *JobExecutor) cancelJobs(ctx context.Context, jobName string) {
 			fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor to %v, cancelling %v", time.Now().UTC(), s.name, jobName, k)
 		}
 		cf()
+		towait = true
 		delete(*s.cancelFuncs, k)
 	}
+	return
 }
 
 //Run - Deamon that dequeues the jobs and executes them
@@ -228,7 +230,7 @@ Loop:
 			}
 			if overrideJob != nil && overrideJob != normalJob {
 				if s.Debug {
-					fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor found another overriding job %v.", time.Now().UTC(), s.name, overrideJob.Name())
+					fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor job %v found another overriding job %v.", time.Now().UTC(), s.name, normalJob.Name(), overrideJob.Name())
 				}
 				continue
 			}
@@ -237,9 +239,10 @@ Loop:
 			if s.Debug {
 				fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor job %v setting up to execute.", time.Now().UTC(), s.name, normalJob.Name())
 			}
-			nextJobId++                         //create jobId
-			if normalJob.MaxDuration() != nil { //If there is MaxDuration given
-				childCtx, childCancelFunc = context.WithTimeout(ctx, *normalJob.MaxDuration()) //create a Timeout context
+			nextJobId++ //create jobId
+			maxDur := normalJob.MaxDuration()
+			if maxDur != nil && (*maxDur) > 0 { //If there is MaxDuration given
+				childCtx, childCancelFunc = context.WithTimeout(ctx, *maxDur) //create a Timeout context
 			} else {
 				childCtx, childCancelFunc = context.WithCancel(ctx) //create a cancel context
 			}
@@ -272,11 +275,13 @@ Loop:
 				fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor picked new overrideJob : %v", time.Now().UTC(), s.name, overrideJob.Name())
 			}
 			//cancel all executing jobs
-			s.cancelJobs(ctx, "execute "+overrideJob.Name())
-			if s.Debug {
-				fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor to execute %v, waiting for all cancelled jobs tp completed", time.Now().UTC(), s.name, overrideJob.Name())
+			towait := s.cancelJobs(ctx, "execute "+overrideJob.Name())
+			if towait {
+				if s.Debug {
+					fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor to execute %v, waiting for all cancelled jobs tp completed", time.Now().UTC(), s.name, overrideJob.Name())
+				}
+				childWg.Wait()
 			}
-			childWg.Wait()
 		case normalJob, channelOpen = <-s.channel: //new normal job
 			if !channelOpen {
 				break Loop
