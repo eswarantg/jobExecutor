@@ -99,7 +99,7 @@ func Test_NormalJob3(t *testing.T) {
 
 	deadline := time.Duration(2) * time.Second //2 second cancel deadling
 
-	job1 := TestJob{name: "NormalJob3", jobType: jobExecutor.QueueJob, when: time.Now(), maxduration: &deadline,
+	job1 := TestJob{name: "NormalJob3_1", jobType: jobExecutor.QueueJob, when: time.Now(), maxduration: &deadline,
 		durSleep: -1 * time.Second} //sleep dur 2 - 1 = 1 sec
 	executor.AddJob(ctx, &job1)
 

@@ -59,54 +59,14 @@ func (s *JobExecutor) AddJob(ctx context.Context, j Job) {
 	}
 	l := len(s.channel)
 	now := time.Now()
+	if s.Debug {
+		fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor queing %v[QueueLen:%v].", now.UTC(), s.name, j.Name(), l+1)
+	}
 	if j.Type() == CancelAndQueueJob {
 		s.overrideChannel <- j
 		s.channel <- j
 	} else {
 		s.channel <- j
-	}
-	if s.Debug {
-		fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor queing %v[QueueLen:%v].", now.UTC(), s.name, j.Name(), l+1)
-	}
-}
-
-func (s *JobExecutor) getLastOverrideJob(ctx context.Context) Job {
-	var lastJob Job
-Loop:
-	for {
-		select {
-		case <-ctx.Done():
-			break Loop
-		case j := <-s.overrideChannel:
-			if lastJob != nil {
-				if s.Debug {
-					fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor rejecting on next override %v.", time.Now().UTC(), s.name, lastJob.Name())
-				}
-			}
-			lastJob = j
-		default:
-			break Loop
-		}
-	}
-	return lastJob
-}
-
-func (s *JobExecutor) ignoreJobsTillOverrideJob(ctx context.Context, override Job) {
-Loop:
-	for {
-		select {
-		case <-ctx.Done():
-			break Loop
-		case j := <-s.channel:
-			if j == override {
-				break Loop
-			} else {
-				if s.Debug {
-					fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor rejecting on override %v for %v.", time.Now().UTC(), s.name, j.Name(), override.Name())
-				}
-			}
-			//No default: must dequeue the job from normal queue too
-		}
 	}
 }
 
@@ -206,34 +166,50 @@ func (s *JobExecutor) Run(ctx context.Context, wg *sync.WaitGroup) {
 		}
 	}()
 
-Loop:
+	waitingForCancelComplete := false   //right now cancelling all running jobs
+	checkingForNewOverrideLoop := false //right now ignoring current selected override with any future overide that might have come
+	clearingPendingNormalJobs := false
+
+OuterLoop:
 	for {
-		if overrideJob != nil { //pending override job?
-			if s.Debug {
-				fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor job %v setting up to execute override.", time.Now().UTC(), s.name, overrideJob.Name())
+		//WaitingCancelCompleteLoop:
+		if waitingForCancelComplete {
+			toWait := s.cancelJobs(ctx, overrideJob.Name())
+			if toWait {
+				childWg.Wait()
 			}
-			s.ignoreJobsTillOverrideJob(ctx, overrideJob)
-			if ctx.Err() != nil {
-				break Loop
-			}
-			normalJob = overrideJob //set as next normalJob
-			overrideJob = nil
 		}
-		if normalJob != nil { //pending normal job
-			//Check if another override job arrived?
-			if s.Debug {
-				fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor job %v setting up to execute normal.", time.Now().UTC(), s.name, normalJob.Name())
-			}
-			overrideJob = s.getLastOverrideJob(ctx)
-			if ctx.Err() != nil {
-				break Loop
-			}
-			if overrideJob != nil && overrideJob != normalJob {
+		waitingForCancelComplete = false
+		//CheckingForNewOverrideLoop:
+		for checkingForNewOverrideLoop && len(s.overrideChannel) > 0 {
+			var j Job
+			select {
+			case <-ctx.Done(): //ctx cancelled
+				break OuterLoop
+			case j, channelOpen = <-s.overrideChannel: //override requested
 				if s.Debug {
-					fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor job %v found another overriding job %v.", time.Now().UTC(), s.name, normalJob.Name(), overrideJob.Name())
+					fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor rejecting on override %v for %v.", time.Now().UTC(), s.name, overrideJob.Name(), j.Name())
 				}
-				continue
+				overrideJob = j
 			}
+		}
+		checkingForNewOverrideLoop = false
+		//ClearingPendingNormalJobs:
+		for clearingPendingNormalJobs && len(s.channel) > 0 && overrideJob != nil && normalJob != overrideJob {
+			var j Job
+			select {
+			case <-ctx.Done(): //ctx cancelled
+				break OuterLoop
+			case normalJob, channelOpen = <-s.channel: //override requested
+				if s.Debug {
+					fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor rejecting on override %v for %v.", time.Now().UTC(), s.name, normalJob.Name(), overrideJob.Name())
+				}
+				normalJob = j
+			}
+		}
+		clearingPendingNormalJobs = false
+		if normalJob != nil {
+			overrideJob = nil
 			var childCtx context.Context
 			var childCancelFunc context.CancelFunc //cancel function for the child Job cancel trigger
 			if s.Debug {
@@ -251,43 +227,45 @@ Loop:
 			go s.executeJob(childCtx, normalJob, nextJobId, jobFinished, &childWg)
 			normalJob = nil
 		}
-
-		select {
-		case <-ctx.Done(): //ctx cancelled
-			break Loop
-		case id, channelOpen := <-jobFinished: //Job finished
-			if !channelOpen {
-				break Loop
-			}
-			if s.Debug {
-				fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor job %v finished.", time.Now().UTC(), s.name, id)
-			}
-			cf, ok := cancelFuncs[id]
-			if ok {
-				cf()
-				delete(cancelFuncs, id)
-			}
-		case overrideJob, channelOpen = <-s.overrideChannel: //override requested
-			if !channelOpen {
-				break Loop
-			}
-			if s.Debug {
-				fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor picked new overrideJob : %v", time.Now().UTC(), s.name, overrideJob.Name())
-			}
-			//cancel all executing jobs
-			towait := s.cancelJobs(ctx, "execute "+overrideJob.Name())
-			if towait {
-				if s.Debug {
-					fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor to execute %v, waiting for all cancelled jobs tp completed", time.Now().UTC(), s.name, overrideJob.Name())
+	WaitingForJobs:
+		for {
+			select {
+			case <-ctx.Done(): //ctx cancelled
+				break OuterLoop
+			case id, channelOpen := <-jobFinished: //Job finished
+				if !channelOpen {
+					break OuterLoop
 				}
-				childWg.Wait()
-			}
-		case normalJob, channelOpen = <-s.channel: //new normal job
-			if !channelOpen {
-				break Loop
-			}
-			if s.Debug {
-				fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor picked new normalJob : %v", time.Now().UTC(), s.name, normalJob.Name())
+				if s.Debug {
+					fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor job %v finished.", time.Now().UTC(), s.name, id)
+				}
+				cf, ok := cancelFuncs[id]
+				if ok {
+					cf()
+					delete(cancelFuncs, id)
+				}
+			case overrideJob, channelOpen = <-s.overrideChannel: //override requested
+				if !channelOpen {
+					break OuterLoop
+				}
+				if s.Debug {
+					fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor picked new overrideJob : %v", time.Now().UTC(), s.name, overrideJob.Name())
+				}
+				waitingForCancelComplete = true   //right now cancelling all running jobs
+				checkingForNewOverrideLoop = true //right now ignoring current selected override with any future overide that might have come
+				clearingPendingNormalJobs = true
+				break WaitingForJobs
+			case normalJob, channelOpen = <-s.channel: //new normal job
+				if !channelOpen {
+					break OuterLoop
+				}
+				if s.Debug {
+					fmt.Fprintf(os.Stdout, "\n%v %v JobExecutor picked new normalJob : %v", time.Now().UTC(), s.name, normalJob.Name())
+				}
+				waitingForCancelComplete = false  //right now cancelling all running jobs
+				checkingForNewOverrideLoop = true //right now ignoring current selected override with any future overide that might have come
+				clearingPendingNormalJobs = false
+				break WaitingForJobs
 			}
 		}
 	}
