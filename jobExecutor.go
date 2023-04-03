@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-//JobExecutor  - Execute jobs queued in seperate go routines
+// JobExecutor  - Execute jobs queued in seperate go routines
 type JobExecutor struct {
 	name             string                        //name of the Job
 	channel          chan Job                      //Channel to get inputs
@@ -21,7 +21,7 @@ type JobExecutor struct {
 	addMutex         sync.Mutex                    //allow adding
 }
 
-//NewJobExecutor - Create a new JobExecutor
+// NewJobExecutor - Create a new JobExecutor
 func NewJobExecutor(name string, queueSize int) *JobExecutor {
 	return &JobExecutor{
 		name:             name,
@@ -42,12 +42,12 @@ func (s *JobExecutor) SetMinSleep(d time.Duration) {
 	s.minSleep = d
 }
 
-//Current Queue of jobs waiting
+// Current Queue of jobs waiting
 func (s *JobExecutor) WaitingQueueLen() int {
 	return len(s.channel)
 }
 
-//Current jobs executing
+// Current jobs executing
 func (s *JobExecutor) ExecutingQueueLen() int {
 	if s.cancelFuncs != nil {
 		return len(*s.cancelFuncs)
@@ -55,7 +55,7 @@ func (s *JobExecutor) ExecutingQueueLen() int {
 	return 0
 }
 
-//AddJob - add a job for execution
+// AddJob - add a job for execution
 func (s *JobExecutor) AddJob(ctx context.Context, j Job) {
 	if j == nil {
 		return
@@ -69,10 +69,22 @@ func (s *JobExecutor) AddJob(ctx context.Context, j Job) {
 		//prevent dequeue till both jobs are added
 		s.addMutex.Lock() //need to queue both of them
 		defer s.addMutex.Unlock()
-		s.overrideChannel <- j
-		s.channel <- j
+		select {
+		case <-ctx.Done():
+			return
+		case s.overrideChannel <- j:
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case s.channel <- j:
+		}
 	} else {
-		s.channel <- j
+		select {
+		case <-ctx.Done():
+			return
+		case s.channel <- j:
+		}
 	}
 }
 
@@ -85,7 +97,11 @@ func (s *JobExecutor) executeJob(ctx context.Context, j Job, jobId int64, jobFin
 			fmt.Fprintf(os.Stdout, "\n%v %v Job %v(%v) finished.", time.Now().UTC(), s.name, j.Name(), jobId)
 		}
 		if ctx.Err() == nil {
-			jobFinished <- jobId
+			select {
+			case <-ctx.Done():
+				return
+			case jobFinished <- jobId:
+			}
 		}
 	}()
 	sleepDur := time.Until(j.When())
@@ -198,7 +214,7 @@ Loop:
 	return normalJob
 }
 
-//Run - Deamon that dequeues the jobs and executes them
+// Run - Deamon that dequeues the jobs and executes them
 func (s *JobExecutor) Run(ctx context.Context, wg *sync.WaitGroup) {
 	//No MUTEX gaurd etc done... as expect disipline to invoke only once
 	//This check is just for accidental second Run
